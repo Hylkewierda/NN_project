@@ -1,0 +1,26 @@
+# Dataset images (too large for GitHub)
+train_set/
+test_set/
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# Model checkpoints (large files)
+*.pt
+*.pth
+*.pkl
+
+# Jupyter
+.ipynb_checkpoints/
+
+# macOS
+.DS_Store
+
+# Virtual environments
+venv/
+env/
+.env
