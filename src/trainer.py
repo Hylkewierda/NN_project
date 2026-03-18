@@ -158,6 +158,11 @@ class Trainer:
                 torch.save(self.model.state_dict(), self.exp_dir / "best_model.pt")
                 print(f"  → New best val accuracy: {val_acc:.4f}")
 
+            # Fix MPS memory leak: flush GPU cache after each epoch
+            if DEVICE.type == "mps":
+                torch.mps.synchronize()
+                torch.mps.empty_cache()
+
         total_time = time.time() - start_time
         print(f"\nTraining complete in {total_time/60:.1f} min. Best val acc: {self.best_val_acc:.4f}")
 

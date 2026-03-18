@@ -24,9 +24,29 @@ Usage:
 
 import argparse
 import json
+import os
+import sys
+import gc
 import torch
 import numpy as np
 from collections import Counter
+
+# MPS stability fixes: fallback to CPU for unsupported ops, disable memory cap
+os.environ.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
+os.environ.setdefault("PYTORCH_MPS_HIGH_WATERMARK_RATIO", "0.0")
+
+
+def flush():
+    """Flush stdout so output is visible in real-time."""
+    sys.stdout.flush()
+
+
+def mps_cleanup():
+    """Free MPS GPU memory between experiments to prevent hangs."""
+    gc.collect()
+    if torch.backends.mps.is_available():
+        torch.mps.synchronize()
+        torch.mps.empty_cache()
 
 from src.config import OUTPUT_DIR, DEVICE, NUM_CLASSES, DATASET_MEAN, DATASET_STD
 from src.dataset import get_dataloaders, get_test_loader, load_train_data
@@ -44,10 +64,10 @@ def run_architecture_experiments():
     results = {}
 
     configs = [
-        ("1_baseline", "baseline", {"augmentation": "basic", "img_size": 128}, {"epochs": 30, "lr": 1e-3}),
-        ("2_deep_cnn", "deep_cnn", {"augmentation": "basic", "img_size": 128}, {"epochs": 8, "lr": 1e-3}),
-        ("3_resnet", "resnet", {"augmentation": "basic", "img_size": 128}, {"epochs": 25, "lr": 1e-3}),
-        ("4_attention_resnet", "attention_resnet", {"augmentation": "basic", "img_size": 128}, {"epochs": 25, "lr": 1e-3}),
+        ("1_baseline", "baseline", {"augmentation": "basic", "img_size": 128}, {"epochs": 20, "lr": 1e-3}),
+        ("2_deep_cnn", "deep_cnn", {"augmentation": "basic", "img_size": 128}, {"epochs": 20, "lr": 1e-3}),
+        ("3_resnet", "resnet", {"augmentation": "basic", "img_size": 128}, {"epochs": 20, "lr": 1e-3}),
+        ("4_attention_resnet", "attention_resnet", {"augmentation": "basic", "img_size": 128}, {"epochs": 20, "lr": 1e-3}),
     ]
 
     for exp_name, model_name, data_kwargs, train_kwargs in configs:
@@ -74,6 +94,7 @@ def run_architecture_experiments():
             **train_kwargs,
         )
         history = trainer.train()
+        flush()
 
         # Save plots
         plot_training_curves(history, trainer.exp_dir / "training_curves.png")
@@ -88,6 +109,11 @@ def run_architecture_experiments():
 
         results[exp_name] = trainer.best_val_acc
 
+        # Free GPU memory before next experiment
+        del model, trainer, train_loader, val_loader
+        mps_cleanup()
+        flush()
+
     # Comparison plot
     plot_experiment_comparison(results, OUTPUT_DIR / "architecture_comparison.png")
     return results
@@ -99,6 +125,16 @@ def run_augmentation_ablation():
 
     for aug_level in ["none", "basic", "medium", "heavy"]:
         exp_name = f"5_aug_{aug_level}"
+
+        # Skip completed
+        history_path = OUTPUT_DIR / exp_name / "history.json"
+        if history_path.exists():
+            with open(history_path) as f:
+                h = json.load(f)
+            results[aug_level] = max(h["val_acc"])
+            print(f"\n>>> Skipping {exp_name} (already done, best val acc: {results[aug_level]:.4f})")
+            continue
+
         print(f"\n{'#'*60}")
         print(f"# Augmentation ablation: {aug_level}")
         print(f"{'#'*60}")
@@ -110,12 +146,16 @@ def run_augmentation_ablation():
         trainer = Trainer(
             model, train_loader, val_loader,
             experiment_name=exp_name,
-            epochs=30, lr=1e-3,
+            epochs=20, lr=1e-3,
             scheduler_type="cosine",
         )
         history = trainer.train()
+        flush()
         plot_training_curves(history, trainer.exp_dir / "training_curves.png")
         results[aug_level] = trainer.best_val_acc
+        del model, trainer, train_loader, val_loader
+        mps_cleanup()
+        flush()
 
     plot_experiment_comparison(results, OUTPUT_DIR / "augmentation_comparison.png")
     return results
@@ -127,6 +167,16 @@ def run_lr_schedule_comparison():
 
     for sched in ["step", "cosine", "onecycle"]:
         exp_name = f"6_lr_{sched}"
+
+        # Skip completed
+        history_path = OUTPUT_DIR / exp_name / "history.json"
+        if history_path.exists():
+            with open(history_path) as f:
+                h = json.load(f)
+            results[sched] = max(h["val_acc"])
+            print(f"\n>>> Skipping {exp_name} (already done, best val acc: {results[sched]:.4f})")
+            continue
+
         print(f"\n{'#'*60}")
         print(f"# LR schedule: {sched}")
         print(f"{'#'*60}")
@@ -138,12 +188,16 @@ def run_lr_schedule_comparison():
         trainer = Trainer(
             model, train_loader, val_loader,
             experiment_name=exp_name,
-            epochs=30, lr=1e-3,
+            epochs=20, lr=1e-3,
             scheduler_type=sched,
         )
         history = trainer.train()
+        flush()
         plot_training_curves(history, trainer.exp_dir / "training_curves.png")
         results[sched] = trainer.best_val_acc
+        del model, trainer, train_loader, val_loader
+        mps_cleanup()
+        flush()
 
     plot_experiment_comparison(results, OUTPUT_DIR / "lr_schedule_comparison.png")
     return results
@@ -155,6 +209,16 @@ def run_label_smoothing_experiment():
 
     for ls in [0.0, 0.05, 0.1, 0.2]:
         exp_name = f"7_ls_{ls}"
+
+        # Skip completed
+        history_path = OUTPUT_DIR / exp_name / "history.json"
+        if history_path.exists():
+            with open(history_path) as f:
+                h = json.load(f)
+            results[f"ls={ls}"] = max(h["val_acc"])
+            print(f"\n>>> Skipping {exp_name} (already done, best val acc: {results[f'ls={ls}']:.4f})")
+            continue
+
         print(f"\n{'#'*60}")
         print(f"# Label smoothing: {ls}")
         print(f"{'#'*60}")
@@ -166,13 +230,17 @@ def run_label_smoothing_experiment():
         trainer = Trainer(
             model, train_loader, val_loader,
             experiment_name=exp_name,
-            epochs=30, lr=1e-3,
+            epochs=20, lr=1e-3,
             scheduler_type="cosine",
             label_smoothing=ls,
         )
         history = trainer.train()
+        flush()
         plot_training_curves(history, trainer.exp_dir / "training_curves.png")
         results[f"ls={ls}"] = trainer.best_val_acc
+        del model, trainer, train_loader, val_loader
+        mps_cleanup()
+        flush()
 
     plot_experiment_comparison(results, OUTPUT_DIR / "label_smoothing_comparison.png")
     return results
@@ -192,7 +260,7 @@ def run_final_model():
     trainer = Trainer(
         model, train_loader, val_loader,
         experiment_name=exp_name,
-        epochs=50, lr=1e-3,
+        epochs=30, lr=1e-3,
         scheduler_type="onecycle",
         label_smoothing=0.1,
     )
