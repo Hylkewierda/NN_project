@@ -22,7 +22,7 @@ DATASET_STD = [0.2259, 0.2413, 0.2647]
 
 # ── Training defaults ──────────────────────────────────────────────────
 BATCH_SIZE = 64
-NUM_WORKERS = 2
+NUM_WORKERS = 0  # MPS requires 0 workers; images are cached in memory anyway
 EPOCHS = 30
 LR = 1e-3
 WEIGHT_DECAY = 1e-4

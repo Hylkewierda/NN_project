@@ -1,0 +1,36 @@
+
+============================================================
+RUNNING ALL EXPERIMENTS
+============================================================
+
+>>> Skipping 1_baseline (already done, best val acc: 0.3080)
+
+>>> Skipping 2_deep_cnn (already done, best val acc: 0.1672)
+
+>>> Skipping 3_resnet (already done, best val acc: 0.3413)
+
+############################################################
+# Experiment: 4_attention_resnet
+############################################################
+  Caching 24489 images in memory...
+    5000/24489 cached
+    10000/24489 cached
+    15000/24489 cached
+    20000/24489 cached
+    Done caching.
+  Caching 6123 images in memory...
+    5000/6123 cached
+    Done caching.
+
+============================================================
+Experiment: 4_attention_resnet
+Model: AttentionResNet
+Parameters: 2,841,984
+Device: mps
+Epochs: 20, LR: 0.001
+============================================================
+
+Epoch   1/20 | Train Loss: 3.7590 Acc: 0.0546 | Val Loss: 3.8362 Acc: 0.0800 | LR: 0.000994 | 120.6s
+  → New best val accuracy: 0.0800
+Epoch   2/20 | Train Loss: 3.2981 Acc: 0.1072 | Val Loss: 3.6237 Acc: 0.1222 | LR: 0.000976 | 129.2s
+  → New best val accuracy: 0.1222

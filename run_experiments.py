@@ -70,6 +70,13 @@ def run_architecture_experiments():
         ("4_attention_resnet", "attention_resnet", {"augmentation": "basic", "img_size": 128}, {"epochs": 20, "lr": 1e-3}),
     ]
 
+    # Pre-load train counts once (avoid repeated CSV reads)
+    _, all_labels = load_train_data()
+    train_counts = dict(Counter([l - 1 for l in all_labels]))
+
+    # Cache dataloaders: all arch experiments use same data config
+    shared_loaders = None
+
     for exp_name, model_name, data_kwargs, train_kwargs in configs:
         # Skip already completed experiments
         history_path = OUTPUT_DIR / exp_name / "history.json"
@@ -79,13 +86,21 @@ def run_architecture_experiments():
             best_acc = max(history["val_acc"])
             results[exp_name] = best_acc
             print(f"\n>>> Skipping {exp_name} (already done, best val acc: {best_acc:.4f})")
+            flush()
             continue
 
         print(f"\n{'#'*60}")
         print(f"# Experiment: {exp_name}")
         print(f"{'#'*60}")
+        flush()
 
-        train_loader, val_loader = get_dataloaders(**data_kwargs)
+        # Reuse dataloaders across arch experiments (same img_size + augmentation)
+        if shared_loaders is None:
+            train_loader, val_loader = get_dataloaders(**data_kwargs)
+            shared_loaders = (train_loader, val_loader)
+        else:
+            train_loader, val_loader = shared_loaders
+
         model = get_model(model_name)
         trainer = Trainer(
             model, train_loader, val_loader,
@@ -101,16 +116,12 @@ def run_architecture_experiments():
         cm = trainer.get_confusion_matrix()
         plot_confusion_matrix(cm, trainer.exp_dir / "confusion_matrix.png")
         per_class = trainer.get_per_class_accuracy()
-
-        # Get train counts per class
-        _, all_labels = load_train_data()
-        train_counts = dict(Counter([l - 1 for l in all_labels]))
         plot_per_class_accuracy(per_class, trainer.exp_dir / "per_class_accuracy.png", train_counts)
 
         results[exp_name] = trainer.best_val_acc
 
-        # Free GPU memory before next experiment
-        del model, trainer, train_loader, val_loader
+        # Free GPU memory before next experiment (but keep dataloaders)
+        del model, trainer
         mps_cleanup()
         flush()
 
@@ -133,12 +144,15 @@ def run_augmentation_ablation():
                 h = json.load(f)
             results[aug_level] = max(h["val_acc"])
             print(f"\n>>> Skipping {exp_name} (already done, best val acc: {results[aug_level]:.4f})")
+            flush()
             continue
 
         print(f"\n{'#'*60}")
         print(f"# Augmentation ablation: {aug_level}")
         print(f"{'#'*60}")
+        flush()
 
+        # Each aug level needs different transforms, so separate dataloaders
         train_loader, val_loader = get_dataloaders(
             img_size=128, augmentation=aug_level,
         )
@@ -165,6 +179,9 @@ def run_lr_schedule_comparison():
     """Experiment 6: Compare LR schedules."""
     results = {}
 
+    # Load data once for all LR experiments (all use medium augmentation)
+    shared_loaders = None
+
     for sched in ["step", "cosine", "onecycle"]:
         exp_name = f"6_lr_{sched}"
 
@@ -175,15 +192,22 @@ def run_lr_schedule_comparison():
                 h = json.load(f)
             results[sched] = max(h["val_acc"])
             print(f"\n>>> Skipping {exp_name} (already done, best val acc: {results[sched]:.4f})")
+            flush()
             continue
 
         print(f"\n{'#'*60}")
         print(f"# LR schedule: {sched}")
         print(f"{'#'*60}")
+        flush()
 
-        train_loader, val_loader = get_dataloaders(
-            img_size=128, augmentation="medium",
-        )
+        if shared_loaders is None:
+            train_loader, val_loader = get_dataloaders(
+                img_size=128, augmentation="medium",
+            )
+            shared_loaders = (train_loader, val_loader)
+        else:
+            train_loader, val_loader = shared_loaders
+
         model = get_model("resnet")
         trainer = Trainer(
             model, train_loader, val_loader,
@@ -195,7 +219,7 @@ def run_lr_schedule_comparison():
         flush()
         plot_training_curves(history, trainer.exp_dir / "training_curves.png")
         results[sched] = trainer.best_val_acc
-        del model, trainer, train_loader, val_loader
+        del model, trainer
         mps_cleanup()
         flush()
 
@@ -207,6 +231,9 @@ def run_label_smoothing_experiment():
     """Experiment 7: Label smoothing effect."""
     results = {}
 
+    # Load data once (all use medium augmentation)
+    shared_loaders = None
+
     for ls in [0.0, 0.05, 0.1, 0.2]:
         exp_name = f"7_ls_{ls}"
 
@@ -217,15 +244,22 @@ def run_label_smoothing_experiment():
                 h = json.load(f)
             results[f"ls={ls}"] = max(h["val_acc"])
             print(f"\n>>> Skipping {exp_name} (already done, best val acc: {results[f'ls={ls}']:.4f})")
+            flush()
             continue
 
         print(f"\n{'#'*60}")
         print(f"# Label smoothing: {ls}")
         print(f"{'#'*60}")
+        flush()
 
-        train_loader, val_loader = get_dataloaders(
-            img_size=128, augmentation="medium",
-        )
+        if shared_loaders is None:
+            train_loader, val_loader = get_dataloaders(
+                img_size=128, augmentation="medium",
+            )
+            shared_loaders = (train_loader, val_loader)
+        else:
+            train_loader, val_loader = shared_loaders
+
         model = get_model("resnet")
         trainer = Trainer(
             model, train_loader, val_loader,
@@ -238,7 +272,7 @@ def run_label_smoothing_experiment():
         flush()
         plot_training_curves(history, trainer.exp_dir / "training_curves.png")
         results[f"ls={ls}"] = trainer.best_val_acc
-        del model, trainer, train_loader, val_loader
+        del model, trainer
         mps_cleanup()
         flush()
 
