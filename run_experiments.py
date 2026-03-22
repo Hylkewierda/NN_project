@@ -335,6 +335,128 @@ def run_final_model():
     return trainer.best_val_acc
 
 
+def run_progressive_resizing():
+    """Progressive resizing: train at 64 -> 128 -> 224, loading weights between stages.
+
+    This acts as curriculum learning — the network learns coarse features fast
+    on small images, then refines on larger ones. Combined with mixup and a
+    wider model for more capacity.
+    """
+    exp_name = "9_progressive"
+    exp_dir = OUTPUT_DIR / exp_name
+    exp_dir.mkdir(parents=True, exist_ok=True)
+
+    stages = [
+        {"img_size": 64,  "epochs": 25, "lr": 2e-3, "batch_size": 128, "augmentation": "basic",  "mixup": 0.0},
+        {"img_size": 128, "epochs": 25, "lr": 1e-3, "batch_size": 64,  "augmentation": "medium", "mixup": 0.2},
+        {"img_size": 224, "epochs": 30, "lr": 5e-4, "batch_size": 32,  "augmentation": "medium", "mixup": 0.4},
+    ]
+
+    model = get_model("resnet_large")
+    all_history = {"stages": []}
+
+    for i, stage in enumerate(stages):
+        stage_dir = exp_dir / f"stage{i+1}_{stage['img_size']}px"
+        stage_dir.mkdir(parents=True, exist_ok=True)
+
+        # Check if this stage was already completed
+        history_path = stage_dir / "history.json"
+        if history_path.exists():
+            with open(history_path) as f:
+                history = json.load(f)
+            best_acc = max(history["val_acc"])
+            print(f"\n>>> Skipping stage {i+1} ({stage['img_size']}px) — already done, best val acc: {best_acc:.4f}")
+            # Load the best model from this stage
+            model.load_state_dict(torch.load(stage_dir / "best_model.pt", map_location=DEVICE))
+            all_history["stages"].append({"size": stage["img_size"], "best_acc": best_acc})
+            flush()
+            continue
+
+        print(f"\n{'#'*60}")
+        print(f"# Progressive Stage {i+1}/3: {stage['img_size']}x{stage['img_size']}")
+        print(f"# Epochs: {stage['epochs']}, LR: {stage['lr']}, Batch: {stage['batch_size']}")
+        print(f"# Augmentation: {stage['augmentation']}, Mixup alpha: {stage['mixup']}")
+        print(f"{'#'*60}")
+        flush()
+
+        train_loader, val_loader = get_dataloaders(
+            img_size=stage["img_size"],
+            batch_size=stage["batch_size"],
+            augmentation=stage["augmentation"],
+        )
+
+        trainer = Trainer(
+            model, train_loader, val_loader,
+            experiment_name=f"{exp_name}/stage{i+1}_{stage['img_size']}px",
+            epochs=stage["epochs"],
+            lr=stage["lr"],
+            scheduler_type="onecycle",
+            label_smoothing=0.1,
+            mixup_alpha=stage["mixup"],
+        )
+        history = trainer.train()
+        flush()
+
+        plot_training_curves(history, stage_dir / "training_curves.png")
+
+        # Load best weights for next stage
+        model.load_state_dict(torch.load(stage_dir / "best_model.pt", map_location=DEVICE))
+        best_acc = trainer.best_val_acc
+        all_history["stages"].append({"size": stage["img_size"], "best_acc": best_acc})
+
+        del trainer, train_loader, val_loader
+        mps_cleanup()
+        flush()
+
+    # Final evaluation at 224px
+    print(f"\n{'#'*60}")
+    print(f"# Final evaluation & submission at 224x224")
+    print(f"{'#'*60}")
+    flush()
+
+    # Reload best model from last stage
+    last_stage_dir = exp_dir / f"stage3_224px"
+    model.load_state_dict(torch.load(last_stage_dir / "best_model.pt", map_location=DEVICE))
+    model.to(DEVICE)
+    model.eval()
+
+    # Confusion matrix & per-class accuracy
+    train_loader, val_loader = get_dataloaders(img_size=224, batch_size=32, augmentation="basic")
+    trainer = Trainer(model, train_loader, val_loader, experiment_name=exp_name, epochs=1)
+    cm = trainer.get_confusion_matrix()
+    plot_confusion_matrix(cm, exp_dir / "confusion_matrix.png")
+
+    _, all_labels = load_train_data()
+    train_counts = dict(Counter([l - 1 for l in all_labels]))
+    per_class = trainer.get_per_class_accuracy()
+    plot_per_class_accuracy(per_class, exp_dir / "per_class_accuracy.png", train_counts)
+
+    # Grad-CAM
+    if hasattr(model, "layer4"):
+        target_layer = model.layer4[-1].conv2
+        for imgs, _ in val_loader:
+            val_imgs = imgs[:8]
+            break
+        plot_gradcam(val_imgs, model, target_layer, exp_dir / "gradcam.png",
+                     DATASET_MEAN, DATASET_STD)
+
+    # t-SNE
+    features, labels = compute_features(model, val_loader)
+    plot_tsne(features, labels, exp_dir / "tsne.png")
+
+    # Submission
+    test_loader, test_names = get_test_loader(img_size=224, batch_size=32)
+    trainer.save_submission(test_loader, test_names, "submission_progressive.csv")
+
+    # Save combined history
+    with open(exp_dir / "all_stages.json", "w") as f:
+        json.dump(all_history, f, indent=2)
+
+    final_acc = all_history["stages"][-1]["best_acc"]
+    print(f"\nProgressive resizing complete! Final best val acc: {final_acc:.4f}")
+    return final_acc
+
+
 def run_analysis_only():
     """Run analysis on already-trained models."""
     all_results = {}
@@ -358,7 +480,8 @@ def main():
     parser = argparse.ArgumentParser(description="Food Recognition Experiments")
     parser.add_argument("--exp", type=str, default="all",
                         choices=["all", "baseline", "architecture", "augmentation",
-                                 "lr_schedule", "label_smoothing", "final", "analyze"],
+                                 "lr_schedule", "label_smoothing", "final",
+                                 "progressive", "analyze"],
                         help="Which experiment to run")
     args = parser.parse_args()
 
@@ -424,6 +547,9 @@ def main():
 
     elif args.exp == "final":
         run_final_model()
+
+    elif args.exp == "progressive":
+        run_progressive_resizing()
 
     elif args.exp == "analyze":
         run_analysis_only()

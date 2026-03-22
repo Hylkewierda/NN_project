@@ -14,6 +14,24 @@ from src.config import DEVICE, EPOCHS, LR, WEIGHT_DECAY, OUTPUT_DIR, NUM_CLASSES
 from src.dataset import get_class_weights
 
 
+def mixup_data(x, y, alpha=0.4):
+    """Apply mixup augmentation: blend pairs of images and labels."""
+    if alpha > 0:
+        lam = np.random.beta(alpha, alpha)
+    else:
+        lam = 1.0
+    batch_size = x.size(0)
+    index = torch.randperm(batch_size, device=x.device)
+    mixed_x = lam * x + (1 - lam) * x[index]
+    y_a, y_b = y, y[index]
+    return mixed_x, y_a, y_b, lam
+
+
+def mixup_criterion(criterion, pred, y_a, y_b, lam):
+    """Compute loss for mixup: weighted combination of two targets."""
+    return lam * criterion(pred, y_a) + (1 - lam) * criterion(pred, y_b)
+
+
 class Trainer:
     """Handles training, validation, logging, and checkpointing."""
 
@@ -29,6 +47,7 @@ class Trainer:
         scheduler_type="cosine",  # 'cosine', 'step', 'onecycle', 'none'
         use_class_weights=True,
         label_smoothing=0.0,
+        mixup_alpha=0.0,
     ):
         self.model = model.to(DEVICE)
         self.train_loader = train_loader
@@ -36,6 +55,7 @@ class Trainer:
         self.experiment_name = experiment_name
         self.epochs = epochs or EPOCHS
         self.lr = lr or LR
+        self.mixup_alpha = mixup_alpha
 
         # Loss function with optional class weights and label smoothing
         if use_class_weights:
@@ -79,8 +99,15 @@ class Trainer:
             imgs, labels = imgs.to(DEVICE), labels.to(DEVICE)
 
             self.optimizer.zero_grad()
-            outputs = self.model(imgs)
-            loss = self.criterion(outputs, labels)
+
+            if self.mixup_alpha > 0:
+                mixed_imgs, y_a, y_b, lam = mixup_data(imgs, labels, self.mixup_alpha)
+                outputs = self.model(mixed_imgs)
+                loss = mixup_criterion(self.criterion, outputs, y_a, y_b, lam)
+            else:
+                outputs = self.model(imgs)
+                loss = self.criterion(outputs, labels)
+
             loss.backward()
             self.optimizer.step()
 

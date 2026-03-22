@@ -297,6 +297,70 @@ class AttentionResNet(nn.Module):
 
 
 # ═══════════════════════════════════════════════════════════════════════
+# 5. Larger ResNet for progressive resizing (more capacity)
+# ═══════════════════════════════════════════════════════════════════════
+
+class FoodResNetLarge(nn.Module):
+    """Wider ResNet with more capacity for higher-resolution training.
+
+    Channels: 64 -> 128 -> 256 -> 512 (2x wider than FoodResNet).
+    """
+
+    def __init__(self, num_classes=NUM_CLASSES, dropout=0.5):
+        super().__init__()
+        self.stem = nn.Sequential(
+            nn.Conv2d(3, 64, 7, stride=2, padding=3, bias=False),
+            nn.BatchNorm2d(64),
+            nn.ReLU(inplace=True),
+            nn.MaxPool2d(3, stride=2, padding=1),
+        )
+        self.layer1 = self._make_layer(64, 64, num_blocks=2, stride=1)
+        self.layer2 = self._make_layer(64, 128, num_blocks=2, stride=2)
+        self.layer3 = self._make_layer(128, 256, num_blocks=2, stride=2)
+        self.layer4 = self._make_layer(256, 512, num_blocks=2, stride=2)
+        self.pool = nn.AdaptiveAvgPool2d(1)
+        self.classifier = nn.Sequential(
+            nn.Dropout(dropout),
+            nn.Linear(512, num_classes),
+        )
+        self._init_weights()
+
+    def _make_layer(self, in_ch, out_ch, num_blocks, stride):
+        layers = [ResidualBlock(in_ch, out_ch, stride)]
+        for _ in range(1, num_blocks):
+            layers.append(ResidualBlock(out_ch, out_ch, 1))
+        return nn.Sequential(*layers)
+
+    def _init_weights(self):
+        for m in self.modules():
+            if isinstance(m, nn.Conv2d):
+                nn.init.kaiming_normal_(m.weight, mode="fan_out", nonlinearity="relu")
+            elif isinstance(m, nn.BatchNorm2d):
+                nn.init.ones_(m.weight)
+                nn.init.zeros_(m.bias)
+
+    def forward(self, x):
+        x = self.stem(x)
+        x = self.layer1(x)
+        x = self.layer2(x)
+        x = self.layer3(x)
+        x = self.layer4(x)
+        x = self.pool(x)
+        x = x.view(x.size(0), -1)
+        return self.classifier(x)
+
+    def get_features(self, x):
+        """Extract features before classifier (for t-SNE visualization)."""
+        x = self.stem(x)
+        x = self.layer1(x)
+        x = self.layer2(x)
+        x = self.layer3(x)
+        x = self.layer4(x)
+        x = self.pool(x)
+        return x.view(x.size(0), -1)
+
+
+# ═══════════════════════════════════════════════════════════════════════
 # Model registry
 # ═══════════════════════════════════════════════════════════════════════
 
@@ -305,6 +369,7 @@ MODEL_REGISTRY = {
     "deep_cnn": DeepCNN,
     "resnet": FoodResNet,
     "attention_resnet": AttentionResNet,
+    "resnet_large": FoodResNetLarge,
 }
 
 
