@@ -8,7 +8,7 @@ from pathlib import Path
 import torch
 import torch.nn as nn
 import numpy as np
-from torch.optim.lr_scheduler import CosineAnnealingLR, StepLR, OneCycleLR
+from torch.optim.lr_scheduler import CosineAnnealingLR, CosineAnnealingWarmRestarts, StepLR, OneCycleLR
 
 from src.config import DEVICE, EPOCHS, LR, WEIGHT_DECAY, OUTPUT_DIR, NUM_CLASSES
 from src.dataset import get_class_weights
@@ -82,6 +82,8 @@ class Trainer:
     def _get_scheduler(self, scheduler_type):
         if scheduler_type == "cosine":
             return CosineAnnealingLR(self.optimizer, T_max=self.epochs, eta_min=1e-6)
+        elif scheduler_type == "cosine_warm_restarts":
+            return CosineAnnealingWarmRestarts(self.optimizer, T_0=15, T_mult=2, eta_min=1e-6)
         elif scheduler_type == "step":
             return StepLR(self.optimizer, step_size=10, gamma=0.1)
         elif scheduler_type == "onecycle":
@@ -203,21 +205,55 @@ class Trainer:
         return self.history
 
     @torch.no_grad()
-    def predict_test(self, test_loader, test_names):
-        """Generate predictions for the test set."""
+    def predict_test(self, test_loader, test_names, tta=False):
+        """Generate predictions for the test set, optionally with TTA."""
         self.model.eval()
-        all_preds = []
 
-        for imgs in test_loader:
-            if isinstance(imgs, (list, tuple)):
-                imgs = imgs[0]
-            imgs = imgs.to(DEVICE)
-            outputs = self.model(imgs)
-            preds = outputs.argmax(1)
-            all_preds.extend(preds.cpu().numpy())
+        if not tta:
+            all_preds = []
+            for imgs in test_loader:
+                if isinstance(imgs, (list, tuple)):
+                    imgs = imgs[0]
+                imgs = imgs.to(DEVICE)
+                outputs = self.model(imgs)
+                preds = outputs.argmax(1)
+                all_preds.extend(preds.cpu().numpy())
+            all_preds = [p + 1 for p in all_preds]
+            return all_preds
 
-        # Convert back to 1-80 labels for submission
+        # TTA: original + horizontal flip + small crops
+        print("Running Test-Time Augmentation (5 passes)...")
+        all_logits = None
+        n_samples = len(test_loader.dataset)
+
+        for tta_idx in range(5):
+            logits_list = []
+            for imgs in test_loader:
+                if isinstance(imgs, (list, tuple)):
+                    imgs = imgs[0]
+                imgs = imgs.to(DEVICE)
+                if tta_idx == 1:
+                    imgs = torch.flip(imgs, dims=[3])  # horizontal flip
+                elif tta_idx == 2:
+                    imgs = torch.flip(imgs, dims=[2])  # vertical flip
+                elif tta_idx == 3:
+                    # slight shift right
+                    imgs = torch.roll(imgs, shifts=8, dims=3)
+                elif tta_idx == 4:
+                    # slight shift down
+                    imgs = torch.roll(imgs, shifts=8, dims=2)
+                outputs = self.model(imgs)
+                logits_list.append(outputs.cpu())
+
+            batch_logits = torch.cat(logits_list, dim=0)
+            if all_logits is None:
+                all_logits = batch_logits
+            else:
+                all_logits += batch_logits
+
+        all_preds = all_logits.argmax(1).numpy()
         all_preds = [p + 1 for p in all_preds]
+        print(f"TTA complete. {len(all_preds)} predictions generated.")
         return all_preds
 
     def save_submission(self, test_loader, test_names, filename=None):

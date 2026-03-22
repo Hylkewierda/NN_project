@@ -457,6 +457,111 @@ def run_progressive_resizing():
     return final_acc
 
 
+def run_progressive_v2():
+    """Progressive resizing v2: load stage2 weights, train longer at 224px.
+
+    Improvements over v1:
+    - 60 epochs at 224px (was 30) — model hadn't converged
+    - Lower mixup (0.1 vs 0.4) — reduces underfitting
+    - Cosine warm restarts — multiple chances to find better minima
+    - TTA at evaluation — free 2-3% boost
+    """
+    exp_name = "10_progressive_v2"
+    exp_dir = OUTPUT_DIR / exp_name
+    exp_dir.mkdir(parents=True, exist_ok=True)
+
+    # Load best model from progressive v1 stage 2 (128px)
+    stage2_path = OUTPUT_DIR / "9_progressive" / "stage2_128px" / "best_model.pt"
+    if not stage2_path.exists():
+        print("ERROR: stage2 weights not found. Run progressive first.")
+        return
+
+    model = get_model("resnet_large")
+    model.load_state_dict(torch.load(stage2_path, map_location=DEVICE))
+    print(f"Loaded stage 2 weights from {stage2_path}")
+    flush()
+
+    # Check if training already done
+    history_path = exp_dir / "history.json"
+    if history_path.exists():
+        with open(history_path) as f:
+            history = json.load(f)
+        best_acc = max(history["val_acc"])
+        print(f"\n>>> Skipping training (already done, best val acc: {best_acc:.4f})")
+        model.load_state_dict(torch.load(exp_dir / "best_model.pt", map_location=DEVICE))
+    else:
+        print(f"\n{'#'*60}")
+        print(f"# Progressive v2: 224px, 60 epochs, mixup=0.1, warm restarts")
+        print(f"{'#'*60}")
+        flush()
+
+        train_loader, val_loader = get_dataloaders(
+            img_size=224, batch_size=32, augmentation="medium",
+        )
+
+        trainer = Trainer(
+            model, train_loader, val_loader,
+            experiment_name=exp_name,
+            epochs=60,
+            lr=5e-4,
+            scheduler_type="cosine_warm_restarts",
+            label_smoothing=0.1,
+            mixup_alpha=0.1,
+        )
+        history = trainer.train()
+        flush()
+
+        plot_training_curves(history, exp_dir / "training_curves.png")
+        best_acc = trainer.best_val_acc
+
+        # Load best weights
+        model.load_state_dict(torch.load(exp_dir / "best_model.pt", map_location=DEVICE))
+
+        del trainer, train_loader, val_loader
+        mps_cleanup()
+
+    # Final evaluation with TTA
+    print(f"\n{'#'*60}")
+    print(f"# Final evaluation & TTA submission at 224x224")
+    print(f"{'#'*60}")
+    flush()
+
+    model.to(DEVICE)
+    model.eval()
+
+    train_loader, val_loader = get_dataloaders(img_size=224, batch_size=32, augmentation="basic")
+    trainer = Trainer(model, train_loader, val_loader, experiment_name=exp_name, epochs=1)
+
+    # Confusion matrix & per-class accuracy
+    cm = trainer.get_confusion_matrix()
+    plot_confusion_matrix(cm, exp_dir / "confusion_matrix.png")
+
+    _, all_labels = load_train_data()
+    train_counts = dict(Counter([l - 1 for l in all_labels]))
+    per_class = trainer.get_per_class_accuracy()
+    plot_per_class_accuracy(per_class, exp_dir / "per_class_accuracy.png", train_counts)
+
+    # Grad-CAM
+    if hasattr(model, "layer4"):
+        target_layer = model.layer4[-1].conv2
+        for imgs, _ in val_loader:
+            val_imgs = imgs[:8]
+            break
+        plot_gradcam(val_imgs, model, target_layer, exp_dir / "gradcam.png",
+                     DATASET_MEAN, DATASET_STD)
+
+    # t-SNE
+    features, labels = compute_features(model, val_loader)
+    plot_tsne(features, labels, exp_dir / "tsne.png")
+
+    # Submission with TTA
+    test_loader, test_names = get_test_loader(img_size=224, batch_size=32)
+    trainer.save_submission(test_loader, test_names, "submission_v2_tta.csv")
+
+    print(f"\nProgressive v2 complete!")
+    return best_acc
+
+
 def run_analysis_only():
     """Run analysis on already-trained models."""
     all_results = {}
@@ -481,7 +586,7 @@ def main():
     parser.add_argument("--exp", type=str, default="all",
                         choices=["all", "baseline", "architecture", "augmentation",
                                  "lr_schedule", "label_smoothing", "final",
-                                 "progressive", "analyze"],
+                                 "progressive", "progressive_v2", "analyze"],
                         help="Which experiment to run")
     args = parser.parse_args()
 
@@ -550,6 +655,9 @@ def main():
 
     elif args.exp == "progressive":
         run_progressive_resizing()
+
+    elif args.exp == "progressive_v2":
+        run_progressive_v2()
 
     elif args.exp == "analyze":
         run_analysis_only()
