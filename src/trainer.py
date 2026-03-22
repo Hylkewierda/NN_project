@@ -27,8 +27,37 @@ def mixup_data(x, y, alpha=0.4):
     return mixed_x, y_a, y_b, lam
 
 
-def mixup_criterion(criterion, pred, y_a, y_b, lam):
-    """Compute loss for mixup: weighted combination of two targets."""
+def cutmix_data(x, y, alpha=1.0):
+    """Apply CutMix: cut and paste rectangular patches between images."""
+    if alpha > 0:
+        lam = np.random.beta(alpha, alpha)
+    else:
+        lam = 1.0
+    batch_size = x.size(0)
+    index = torch.randperm(batch_size, device=x.device)
+
+    _, _, h, w = x.shape
+    cut_ratio = np.sqrt(1.0 - lam)
+    cut_h = int(h * cut_ratio)
+    cut_w = int(w * cut_ratio)
+
+    cy = np.random.randint(h)
+    cx = np.random.randint(w)
+    y1 = np.clip(cy - cut_h // 2, 0, h)
+    y2 = np.clip(cy + cut_h // 2, 0, h)
+    x1 = np.clip(cx - cut_w // 2, 0, w)
+    x2 = np.clip(cx + cut_w // 2, 0, w)
+
+    mixed_x = x.clone()
+    mixed_x[:, :, y1:y2, x1:x2] = x[index, :, y1:y2, x1:x2]
+
+    # Adjust lambda to actual area ratio
+    lam = 1 - ((y2 - y1) * (x2 - x1) / (h * w))
+    return mixed_x, y, y[index], lam
+
+
+def mix_criterion(criterion, pred, y_a, y_b, lam):
+    """Compute loss for mixup/cutmix: weighted combination of two targets."""
     return lam * criterion(pred, y_a) + (1 - lam) * criterion(pred, y_b)
 
 
@@ -48,6 +77,7 @@ class Trainer:
         use_class_weights=True,
         label_smoothing=0.0,
         mixup_alpha=0.0,
+        cutmix_alpha=0.0,
     ):
         self.model = model.to(DEVICE)
         self.train_loader = train_loader
@@ -56,6 +86,7 @@ class Trainer:
         self.epochs = epochs or EPOCHS
         self.lr = lr or LR
         self.mixup_alpha = mixup_alpha
+        self.cutmix_alpha = cutmix_alpha
 
         # Loss function with optional class weights and label smoothing
         if use_class_weights:
@@ -102,10 +133,14 @@ class Trainer:
 
             self.optimizer.zero_grad()
 
-            if self.mixup_alpha > 0:
+            if self.cutmix_alpha > 0 and np.random.rand() < 0.5:
+                mixed_imgs, y_a, y_b, lam = cutmix_data(imgs, labels, self.cutmix_alpha)
+                outputs = self.model(mixed_imgs)
+                loss = mix_criterion(self.criterion, outputs, y_a, y_b, lam)
+            elif self.mixup_alpha > 0:
                 mixed_imgs, y_a, y_b, lam = mixup_data(imgs, labels, self.mixup_alpha)
                 outputs = self.model(mixed_imgs)
-                loss = mixup_criterion(self.criterion, outputs, y_a, y_b, lam)
+                loss = mix_criterion(self.criterion, outputs, y_a, y_b, lam)
             else:
                 outputs = self.model(imgs)
                 loss = self.criterion(outputs, labels)

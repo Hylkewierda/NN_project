@@ -361,6 +361,95 @@ class FoodResNetLarge(nn.Module):
 
 
 # ═══════════════════════════════════════════════════════════════════════
+# 6. SE-ResNet34 — deeper + wider + SE attention for v3
+# ═══════════════════════════════════════════════════════════════════════
+
+class SEResidualBlock(nn.Module):
+    """Residual block with Squeeze-and-Excitation attention."""
+
+    def __init__(self, in_ch, out_ch, stride=1):
+        super().__init__()
+        self.conv1 = nn.Conv2d(in_ch, out_ch, 3, stride, 1, bias=False)
+        self.bn1 = nn.BatchNorm2d(out_ch)
+        self.conv2 = nn.Conv2d(out_ch, out_ch, 3, 1, 1, bias=False)
+        self.bn2 = nn.BatchNorm2d(out_ch)
+        self.se = SEBlock(out_ch, reduction=16)
+
+        self.shortcut = nn.Sequential()
+        if stride != 1 or in_ch != out_ch:
+            self.shortcut = nn.Sequential(
+                nn.Conv2d(in_ch, out_ch, 1, stride, bias=False),
+                nn.BatchNorm2d(out_ch),
+            )
+
+    def forward(self, x):
+        out = F.relu(self.bn1(self.conv1(x)), inplace=True)
+        out = self.bn2(self.conv2(out))
+        out = self.se(out)
+        out += self.shortcut(x)
+        return F.relu(out, inplace=True)
+
+
+class SEResNet34(nn.Module):
+    """ResNet-34 style with SE attention: deeper (3 blocks/layer), wider channels.
+
+    ~21M parameters. Designed for training from scratch at higher resolutions.
+    """
+
+    def __init__(self, num_classes=NUM_CLASSES, dropout=0.5):
+        super().__init__()
+        self.stem = nn.Sequential(
+            nn.Conv2d(3, 64, 7, stride=2, padding=3, bias=False),
+            nn.BatchNorm2d(64),
+            nn.ReLU(inplace=True),
+            nn.MaxPool2d(3, stride=2, padding=1),
+        )
+        self.layer1 = self._make_layer(64, 64, num_blocks=3, stride=1)
+        self.layer2 = self._make_layer(64, 128, num_blocks=4, stride=2)
+        self.layer3 = self._make_layer(128, 256, num_blocks=6, stride=2)
+        self.layer4 = self._make_layer(256, 512, num_blocks=3, stride=2)
+        self.pool = nn.AdaptiveAvgPool2d(1)
+        self.classifier = nn.Sequential(
+            nn.Dropout(dropout),
+            nn.Linear(512, num_classes),
+        )
+        self._init_weights()
+
+    def _make_layer(self, in_ch, out_ch, num_blocks, stride):
+        layers = [SEResidualBlock(in_ch, out_ch, stride)]
+        for _ in range(1, num_blocks):
+            layers.append(SEResidualBlock(out_ch, out_ch, 1))
+        return nn.Sequential(*layers)
+
+    def _init_weights(self):
+        for m in self.modules():
+            if isinstance(m, nn.Conv2d):
+                nn.init.kaiming_normal_(m.weight, mode="fan_out", nonlinearity="relu")
+            elif isinstance(m, nn.BatchNorm2d):
+                nn.init.ones_(m.weight)
+                nn.init.zeros_(m.bias)
+
+    def forward(self, x):
+        x = self.stem(x)
+        x = self.layer1(x)
+        x = self.layer2(x)
+        x = self.layer3(x)
+        x = self.layer4(x)
+        x = self.pool(x)
+        x = x.view(x.size(0), -1)
+        return self.classifier(x)
+
+    def get_features(self, x):
+        x = self.stem(x)
+        x = self.layer1(x)
+        x = self.layer2(x)
+        x = self.layer3(x)
+        x = self.layer4(x)
+        x = self.pool(x)
+        return x.view(x.size(0), -1)
+
+
+# ═══════════════════════════════════════════════════════════════════════
 # Model registry
 # ═══════════════════════════════════════════════════════════════════════
 
@@ -370,6 +459,7 @@ MODEL_REGISTRY = {
     "resnet": FoodResNet,
     "attention_resnet": AttentionResNet,
     "resnet_large": FoodResNetLarge,
+    "se_resnet34": SEResNet34,
 }
 
 

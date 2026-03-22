@@ -562,6 +562,126 @@ def run_progressive_v2():
     return best_acc
 
 
+def run_progressive_v3():
+    """Progressive v3: SE-ResNet34 + CutMix + 288px + full progressive pipeline.
+
+    Key changes from v2:
+    - SE-ResNet34: deeper (3-4-6-3 blocks) + SE attention (~21M params)
+    - CutMix instead of Mixup (better for food — preserves local features)
+    - 288px resolution (closer to original ~363x278)
+    - OneCycle scheduler (no warm restarts — they hurt in v2)
+    - Full 3-stage progressive: 64 -> 128 -> 288
+    """
+    exp_name = "11_progressive_v3"
+    exp_dir = OUTPUT_DIR / exp_name
+    exp_dir.mkdir(parents=True, exist_ok=True)
+
+    stages = [
+        {"img_size": 64,  "epochs": 20, "lr": 2e-3, "batch_size": 128, "augmentation": "basic",  "cutmix": 0.0},
+        {"img_size": 128, "epochs": 25, "lr": 1e-3, "batch_size": 64,  "augmentation": "medium", "cutmix": 0.5},
+        {"img_size": 288, "epochs": 50, "lr": 5e-4, "batch_size": 24,  "augmentation": "medium", "cutmix": 1.0},
+    ]
+
+    model = get_model("se_resnet34")
+    print(f"SE-ResNet34 parameters: {sum(p.numel() for p in model.parameters()):,}")
+    all_history = {"stages": []}
+
+    for i, stage in enumerate(stages):
+        stage_dir = exp_dir / f"stage{i+1}_{stage['img_size']}px"
+        stage_dir.mkdir(parents=True, exist_ok=True)
+
+        # Skip completed stages
+        history_path = stage_dir / "history.json"
+        if history_path.exists():
+            with open(history_path) as f:
+                history = json.load(f)
+            best_acc = max(history["val_acc"])
+            print(f"\n>>> Skipping stage {i+1} ({stage['img_size']}px) — already done, best val acc: {best_acc:.4f}")
+            model.load_state_dict(torch.load(stage_dir / "best_model.pt", map_location=DEVICE))
+            all_history["stages"].append({"size": stage["img_size"], "best_acc": best_acc})
+            flush()
+            continue
+
+        print(f"\n{'#'*60}")
+        print(f"# v3 Stage {i+1}/3: {stage['img_size']}x{stage['img_size']}")
+        print(f"# Epochs: {stage['epochs']}, LR: {stage['lr']}, Batch: {stage['batch_size']}")
+        print(f"# Augmentation: {stage['augmentation']}, CutMix alpha: {stage['cutmix']}")
+        print(f"{'#'*60}")
+        flush()
+
+        train_loader, val_loader = get_dataloaders(
+            img_size=stage["img_size"],
+            batch_size=stage["batch_size"],
+            augmentation=stage["augmentation"],
+        )
+
+        trainer = Trainer(
+            model, train_loader, val_loader,
+            experiment_name=f"{exp_name}/stage{i+1}_{stage['img_size']}px",
+            epochs=stage["epochs"],
+            lr=stage["lr"],
+            scheduler_type="onecycle",
+            label_smoothing=0.1,
+            cutmix_alpha=stage["cutmix"],
+        )
+        history = trainer.train()
+        flush()
+
+        plot_training_curves(history, stage_dir / "training_curves.png")
+
+        model.load_state_dict(torch.load(stage_dir / "best_model.pt", map_location=DEVICE))
+        best_acc = trainer.best_val_acc
+        all_history["stages"].append({"size": stage["img_size"], "best_acc": best_acc})
+
+        del trainer, train_loader, val_loader
+        mps_cleanup()
+        flush()
+
+    # Final evaluation with TTA
+    print(f"\n{'#'*60}")
+    print(f"# Final evaluation & TTA submission at 288x288")
+    print(f"{'#'*60}")
+    flush()
+
+    last_stage_dir = exp_dir / "stage3_288px"
+    model.load_state_dict(torch.load(last_stage_dir / "best_model.pt", map_location=DEVICE))
+    model.to(DEVICE)
+    model.eval()
+
+    train_loader, val_loader = get_dataloaders(img_size=288, batch_size=24, augmentation="basic")
+    trainer = Trainer(model, train_loader, val_loader, experiment_name=exp_name, epochs=1)
+
+    cm = trainer.get_confusion_matrix()
+    plot_confusion_matrix(cm, exp_dir / "confusion_matrix.png")
+
+    _, all_labels = load_train_data()
+    train_counts = dict(Counter([l - 1 for l in all_labels]))
+    per_class = trainer.get_per_class_accuracy()
+    plot_per_class_accuracy(per_class, exp_dir / "per_class_accuracy.png", train_counts)
+
+    if hasattr(model, "layer4"):
+        target_layer = model.layer4[-1].conv2
+        for imgs, _ in val_loader:
+            val_imgs = imgs[:8]
+            break
+        plot_gradcam(val_imgs, model, target_layer, exp_dir / "gradcam.png",
+                     DATASET_MEAN, DATASET_STD)
+
+    features, labels = compute_features(model, val_loader)
+    plot_tsne(features, labels, exp_dir / "tsne.png")
+
+    # Submission with TTA
+    test_loader, test_names = get_test_loader(img_size=288, batch_size=24)
+    trainer.save_submission(test_loader, test_names, "submission_v3_tta.csv")
+
+    with open(exp_dir / "all_stages.json", "w") as f:
+        json.dump(all_history, f, indent=2)
+
+    final_acc = all_history["stages"][-1]["best_acc"]
+    print(f"\nProgressive v3 complete! Final best val acc: {final_acc:.4f}")
+    return final_acc
+
+
 def run_analysis_only():
     """Run analysis on already-trained models."""
     all_results = {}
@@ -586,7 +706,7 @@ def main():
     parser.add_argument("--exp", type=str, default="all",
                         choices=["all", "baseline", "architecture", "augmentation",
                                  "lr_schedule", "label_smoothing", "final",
-                                 "progressive", "progressive_v2", "analyze"],
+                                 "progressive", "progressive_v2", "progressive_v3", "analyze"],
                         help="Which experiment to run")
     args = parser.parse_args()
 
@@ -658,6 +778,9 @@ def main():
 
     elif args.exp == "progressive_v2":
         run_progressive_v2()
+
+    elif args.exp == "progressive_v3":
+        run_progressive_v3()
 
     elif args.exp == "analyze":
         run_analysis_only()
